@@ -51,25 +51,24 @@ const VIRTUAL_H = 1280;
 const BOARD_SIZE = 720;
 const TILE_SIZE = BOARD_SIZE / 15;
 
-// Premium Vibrant Color Palette
 const COLOR_BG = "#1a252f";
 const COLOR_BOARD_BG = "#f8f9fa";
 const COLOR_LINE = "#dfe4ea";
 const COLOR_TEXT = "#ffffff";
 const COLOR_CENTER = "#2c3e50";
 
-// Audio Context & Buffers for high-performance mobile playback
+// Optimized Audio Engine to Prevent Garbage Collection Crashes
 let audioCtx = null;
 let soundBuffers = { roll: null, move: null, cut: null };
 
 function initAudio() {
     if (audioCtx) return;
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    
-    // Load sound files using fetch
-    loadSound('dice_roll.wav', 'roll');
-    loadSound('token_move.wav', 'move');
-    loadSound('token_cut.wav', 'cut');
+    try {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        loadSound('dice_roll.wav', 'roll');
+        loadSound('token_move.wav', 'move');
+        loadSound('token_cut.wav', 'cut');
+    } catch(e) { console.log(e); }
 }
 
 function loadSound(url, key) {
@@ -77,19 +76,24 @@ function loadSound(url, key) {
         .then(response => response.arrayBuffer())
         .then(data => audioCtx.decodeAudioData(data))
         .then(buffer => { soundBuffers[key] = buffer; })
-        .catch(e => console.log("Sound load error (Play via local server to fix):", e));
+        .catch(e => console.log("Sound load bypass:", e));
 }
 
 function playSound(key) {
     if (!audioCtx || !soundBuffers[key]) return;
-    // Resume context if suspended (browser security feature)
     if (audioCtx.state === 'suspended') {
         audioCtx.resume();
     }
-    let source = audioCtx.createBufferSource();
-    source.buffer = soundBuffers[key];
-    source.connect(audioCtx.destination);
-    source.start(0);
+    try {
+        let source = audioCtx.createBufferSource();
+        source.buffer = soundBuffers[key];
+        source.connect(audioCtx.destination);
+        source.start(0);
+        // Automatically disconnect from memory when done playing
+        source.onended = () => {
+            source.disconnect();
+        };
+    } catch(e) { console.log(e); }
 }
 
 const MAIN_PATH = [
@@ -116,7 +120,6 @@ const ALL_COLORS = [
     { color: "#1e90ff", name: "Blue", startIndex: 39, homePath: [[7,13],[7,12],[7,11],[7,10],[7,9]], yard: [[2,11],[3,11],[2,12],[3,12]] }
 ];
 
-// --- GAME STATE ---
 let appState = "MENU"; 
 let menuStep = "COUNT"; 
 let playerCount = 2;
@@ -331,7 +334,6 @@ function calculateTargets() {
     });
 }
 
-// --- RENDERING MANAGEMENT ---
 function drawMenu() {
     ctx.fillStyle = COLOR_BG;
     ctx.fillRect(0, 0, VIRTUAL_W, VIRTUAL_H);
@@ -513,10 +515,9 @@ function drawUI() {
     ctx.fillText(msgStr, VIRTUAL_W / 2, 1150);
 }
 
-// --- INPUT & TOUCH CONTROLS ---
 function handleInput(e) {
-    e.preventDefault();
-    initAudio(); // Initialize audio context on first user interaction (Crucial for Mobile)
+    if (e.cancelable) e.preventDefault();
+    initAudio(); 
 
     let rect = canvas.getBoundingClientRect();
     let clientX = e.touches ? e.touches[0].clientX : e.clientX;
@@ -583,7 +584,6 @@ function handleInput(e) {
 canvas.addEventListener('mousedown', handleInput);
 canvas.addEventListener('touchstart', handleInput, { passive: false });
 
-// --- UTILITIES & GAME LOOP ---
 function roundRect(x, y, w, h, r, fill, stroke) {
     ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
     if (fill) ctx.fill(); if (stroke) ctx.stroke();
