@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Ludo Mobile Pro HTML5</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #1a252f;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        #gameContainer {
+            position: relative;
+            width: 100%;
+            max-width: 450px;
+            height: 100%;
+            max-height: 800px;
+            aspect-ratio: 450 / 800;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+            background-color: #1a252f;
+        }
+        canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+
+<div id="gameContainer">
+    <canvas id="ludoCanvas" width="720" height="1280"></canvas>
+</div>
+
+<script>
+const canvas = document.getElementById('ludoCanvas');
+const ctx = canvas.getContext('2d');
+
+// --- GAME CONFIGURATION ---
+const VIRTUAL_W = 720;
+const VIRTUAL_H = 1280;
+const BOARD_SIZE = 720;
+const TILE_SIZE = BOARD_SIZE / 15;
+
+// Premium Vibrant Color Palette
+const COLOR_BG = "#1a252f";
+const COLOR_BOARD_BG = "#f8f9fa";
+const COLOR_LINE = "#dfe4ea";
+const COLOR_TEXT = "#ffffff";
+const COLOR_CENTER = "#2c3e50";
+
+// Audio Context & Buffers for high-performance mobile playback
+let audioCtx = null;
+let soundBuffers = { roll: null, move: null, cut: null };
+
+function initAudio() {
+    if (audioCtx) return;
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    
+    // Load sound files using fetch
+    loadSound('dice_roll.wav', 'roll');
+    loadSound('token_move.wav', 'move');
+    loadSound('token_cut.wav', 'cut');
+}
+
+function loadSound(url, key) {
+    fetch(url)
+        .then(response => response.arrayBuffer())
+        .then(data => audioCtx.decodeAudioData(data))
+        .then(buffer => { soundBuffers[key] = buffer; })
+        .catch(e => console.log("Sound load error (Play via local server to fix):", e));
+}
+
+function playSound(key) {
+    if (!audioCtx || !soundBuffers[key]) return;
+    // Resume context if suspended (browser security feature)
+    if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+    let source = audioCtx.createBufferSource();
+    source.buffer = soundBuffers[key];
+    source.connect(audioCtx.destination);
+    source.start(0);
+}
+
+const MAIN_PATH = [
+    [1,6],[2,6],[3,6],[4,6],[5,6],             
+    [6,5],[6,4],[6,3],[6,2],[6,1],[6,0],       
+    [7,0],[8,0],                               
+    [8,1],[8,2],[8,3],[8,4],[8,5],             
+    [9,6],[10,6],[11,6],[12,6],[13,6],[14,6],  
+    [14,7],[14,8],                             
+    [13,8],[12,8],[11,8],[10,8],[9,8],         
+    [8,9],[8,10],[8,11],[8,12],[8,13],[8,14],  
+    [7,14],[6,14],                             
+    [6,13],[6,12],[6,11],[6,10],[6,9],         
+    [5,8],[4,8],[3,8],[2,8],[1,8],[0,8],       
+    [0,7],[0,6]                                
+];
+
+const SAFE_ZONES = [0, 8, 13, 21, 26, 34, 39, 47];
+
+const ALL_COLORS = [
+    { color: "#ff4d4d", name: "Red", startIndex: 0, homePath: [[1,7],[2,7],[3,7],[4,7],[5,7]], yard: [[2,2],[3,2],[2,3],[3,3]] },
+    { color: "#2ed573", name: "Green", startIndex: 13, homePath: [[7,1],[7,2],[7,3],[7,4],[7,5]], yard: [[11,2],[12,2],[11,3],[12,3]] },
+    { color: "#ffa502", name: "Yellow", startIndex: 26, homePath: [[13,7],[12,7],[11,7],[10,7],[9,7]], yard: [[11,11],[12,11],[11,12],[12,12]] },
+    { color: "#1e90ff", name: "Blue", startIndex: 39, homePath: [[7,13],[7,12],[7,11],[7,10],[7,9]], yard: [[2,11],[3,11],[2,12],[3,12]] }
+];
+
+// --- GAME STATE ---
+let appState = "MENU"; 
+let menuStep = "COUNT"; 
+let playerCount = 2;
+let selectedColorsIndices = [];
+let gameData = null;
+
+const btnRect = { x: 60, y: 1020, w: 600, h: 80 };
+const diceRect = { x: 300, y: 860, w: 120, h: 120 };
+
+class Token {
+    constructor(id, playerIndex) {
+        this.id = id;
+        this.playerIndex = playerIndex;
+        this.state = 'YARD';
+        this.position = -1;
+        this.x = 0;
+        this.y = 0;
+        this.targetX = 0;
+        this.targetY = 0;
+        this.radius = TILE_SIZE / 2.4;
+    }
+    updatePosition() {
+        this.x += (this.targetX - this.x) * 0.18;
+        this.y += (this.targetY - this.y) * 0.18;
+    }
+}
+
+class LudoGame {
+    constructor(configs) {
+        this.players = configs.map((config, i) => {
+            let p = { ...config };
+            p.tokens = Array.from({ length: 4 }, (_, j) => new Token(j, i));
+            return p;
+        });
+        this.numPlayers = this.players.length;
+        this.activePlayerIndex = 0;
+        this.currentRoll = 0;
+        this.consecutiveSixes = 0;
+        this.state = 'WAITING_FOR_ROLL';
+        this.isAnimatingDice = false;
+        this.diceAnimStart = 0;
+        this.dummyDiceVal = 1;
+        this.skipTimer = 0;
+    }
+
+    rollDice() {
+        if (this.state !== 'WAITING_FOR_ROLL') return;
+        this.currentRoll = Math.floor(Math.random() * 6) + 1;
+        
+        if (this.currentRoll === 6) {
+            this.consecutiveSixes++;
+            if (this.consecutiveSixes === 3) {
+                this.state = 'NO_MOVES_SKIP';
+                this.skipTimer = Date.now();
+                return;
+            }
+        } else {
+            this.consecutiveSixes = 0;
+        }
+
+        let movable = this.getMovableTokens();
+        if (movable.length === 0) {
+            this.state = 'NO_MOVES_SKIP';
+            this.skipTimer = Date.now();
+        } else {
+            this.state = 'WAITING_FOR_MOVE';
+        }
+    }
+
+    getMovableTokens() {
+        let player = this.players[this.activePlayerIndex];
+        let movable = [];
+        player.tokens.forEach(t => {
+            if (t.state === 'GOAL') return;
+            if (t.state === 'YARD' && this.currentRoll === 6) movable.push(t);
+            else if (t.state === 'ACTIVE') {
+                let stepsLeft = 51 - this.getRelativePosition(t.position, player.startIndex);
+                if (stepsLeft + 5 >= this.currentRoll) movable.push(t);
+            }
+            else if (t.state === 'HOME_PATH' && t.position + this.currentRoll <= 5) movable.push(t);
+        });
+        return movable;
+    }
+
+    getRelativePosition(globalPos, startIndex) {
+        return (globalPos - startIndex + 52) % 52;
+    }
+
+    moveToken(tokenId) {
+        if (this.state !== 'WAITING_FOR_MOVE') return;
+        let player = this.players[this.activePlayerIndex];
+        let token = player.tokens[tokenId];
+        
+        playSound('move');
+
+        if (token.state === 'YARD') {
+            token.state = 'ACTIVE';
+            token.position = player.startIndex;
+        } else if (token.state === 'ACTIVE') {
+            let relPos = this.getRelativePosition(token.position, player.startIndex);
+            if (relPos + this.currentRoll > 50) {
+                let overflow = (relPos + this.currentRoll) - 51;
+                token.state = 'HOME_PATH';
+                token.position = overflow - 1;
+            } else {
+                token.position = (token.position + this.currentRoll) % 52;
+                this.checkCollision(token);
+            }
+        } else if (token.state === 'HOME_PATH') {
+            token.position += this.currentRoll;
+        }
+
+        if (token.state === 'HOME_PATH' && token.position === 5) {
+            token.state = 'GOAL';
+        }
+
+        if (this.currentRoll === 6 && this.consecutiveSixes < 3) {
+            this.state = 'WAITING_FOR_ROLL';
+        } else {
+            this.endTurn();
+        }
+    }
+
+    checkCollision(movedToken) {
+        if (SAFE_ZONES.includes(movedToken.position)) return;
+        this.players.forEach((player, pIdx) => {
+            if (pIdx === this.activePlayerIndex) return;
+            player.tokens.forEach(t => {
+                if (t.state === 'ACTIVE' && t.position === movedToken.position) {
+                    t.state = 'YARD';
+                    t.position = -1;
+                    playSound('cut');
+                }
+            });
+        });
+    }
+
+    endTurn() {
+        if (this.currentRoll !== 6 || this.consecutiveSixes === 3) {
+            this.activePlayerIndex = (this.activePlayerIndex + 1) % this.numPlayers;
+            this.consecutiveSixes = 0;
+        }
+        this.currentRoll = 0;
+        this.state = 'WAITING_FOR_ROLL';
+    }
+}
+
+function initGameWorld() {
+    let configs = selectedColorsIndices.map(idx => ALL_COLORS[idx]);
+    gameData = new LudoGame(configs);
+    gameData.players.forEach((player) => {
+        player.tokens.forEach((t, tIdx) => {
+            t.x = player.yard[tIdx][0] * TILE_SIZE + TILE_SIZE / 2;
+            t.y = player.yard[tIdx][1] * TILE_SIZE + TILE_SIZE / 2;
+        });
+    });
+}
+
+function calculateTargets() {
+    if (!gameData) return;
+    let tileOccupancy = {};
+    gameData.players.forEach((player, pIdx) => {
+        player.tokens.forEach((t, tIdx) => {
+            let key = "", gridX = 0, gridY = 0;
+            if (t.state === 'YARD') {
+                gridX = player.yard[tIdx][0]; gridY = player.yard[tIdx][1];
+                key = `YARD-${pIdx}-${tIdx}`;
+            } else if (t.state === 'ACTIVE') {
+                gridX = MAIN_PATH[t.position][0]; gridY = MAIN_PATH[t.position][1];
+                key = `TRACK-${gridX}-${gridY}`;
+            } else if (t.state === 'HOME_PATH') {
+                gridX = player.homePath[t.position][0]; gridY = player.homePath[t.position][1];
+                key = `HOME-${pIdx}-${t.position}`;
+            } else if (t.state === 'GOAL') {
+                gridX = 7; gridY = 7;
+                key = "GOAL";
+            }
+
+            if (!tileOccupancy[key]) {
+                tileOccupancy[key] = { gridX: gridX, gridY: gridY, tokens: [], state: t.state };
+            }
+            tileOccupancy[key].tokens.push(t);
+        });
+    });
+
+    Object.keys(tileOccupancy).forEach(key => {
+        let cell = tileOccupancy[key];
+        let count = cell.tokens.length;
+        cell.tokens.forEach((t, idx) => {
+            let cx = cell.gridX * TILE_SIZE + TILE_SIZE / 2;
+            let cy = cell.gridY * TILE_SIZE + TILE_SIZE / 2;
+
+            if (count > 1 && cell.state !== 'YARD') {
+                if (cell.state === 'GOAL') {
+                    let pIdx = t.playerIndex;
+                    cx = 7.5 * TILE_SIZE + (pIdx % 2 === 0 ? -22 : 22);
+                    cy = 7.5 * TILE_SIZE + (pIdx < 2 ? -22 : 22);
+                    cx += (idx % 2 === 0 ? -6 : 8);
+                } else {
+                    let offset = TILE_SIZE / 4.2;
+                    if (idx === 0) { cx -= offset; cy -= offset; }
+                    else if (idx === 1) { cx += offset; cy -= offset; }
+                    else if (idx === 2) { cx -= offset; cy += offset; }
+                    else if (idx === 3) { cx += offset; cy += offset; }
+                }
+                t.radius = TILE_SIZE / 4.2;
+            } else {
+                t.radius = TILE_SIZE / 2.4;
+            }
+            t.targetX = cx; t.targetY = cy;
+        });
+    });
+}
+
+// --- RENDERING MANAGEMENT ---
+function drawMenu() {
+    ctx.fillStyle = COLOR_BG;
+    ctx.fillRect(0, 0, VIRTUAL_W, VIRTUAL_H);
+
+    ctx.fillStyle = "#ffa502";
+    ctx.font = "bold 52px Arial";
+    ctx.textAlign = "center";
+    ctx.fillText("LUDO PRO MOBILE", VIRTUAL_W / 2, 220);
+
+    if (menuStep === "COUNT") {
+        ctx.fillStyle = COLOR_TEXT;
+        ctx.font = "bold 28px Arial";
+        ctx.fillText("Select Number of Players:", VIRTUAL_W / 2, 420);
+
+        for (let i = 0; i < 3; i++) {
+            let num = i + 2;
+            let bx = 110 + i * 180;
+            ctx.fillStyle = (playerCount === num) ? "#2ed573" : "#747d8c";
+            roundRect(bx, 520, 140, 90, 18, true);
+            ctx.fillStyle = COLOR_TEXT;
+            ctx.font = "bold 32px Arial";
+            ctx.fillText(num, bx + 70, 575);
+        }
+
+        ctx.fillStyle = "#1e90ff";
+        roundRect(160, 780, 400, 75, 15, true);
+        ctx.fillStyle = COLOR_TEXT;
+        ctx.font = "bold 24px Arial";
+        ctx.fillText("Next: Choose Colors", 360, 825);
+    } 
+    else if (menuStep === "COLORS") {
+        let needed = playerCount - selectedColorsIndices.length;
+        let msg = needed > 0 ? `Player ${selectedColorsIndices.length + 1}: Choose Color` : "Ready to Roll!";
+        ctx.fillStyle = COLOR_TEXT;
+        ctx.font = "bold 28px Arial";
+        ctx.fillText(msg, VIRTUAL_W / 2, 380);
+
+        const positions = [[130, 460], [410, 460], [130, 600], [410, 600]];
+        ALL_COLORS.forEach((cInfo, i) => {
+            let [bx, by] = positions[i];
+            ctx.fillStyle = cInfo.color;
+            roundRect(bx, by, 180, 110, 15, true);
+            
+            let isSelected = selectedColorsIndices.includes(i);
+            if (isSelected) {
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 6;
+                roundRect(bx, by, 180, 110, 15, false, true);
+                ctx.fillStyle = "#ffffff";
+                ctx.font = "bold 32px Arial";
+                ctx.fillText(`P${selectedColorsIndices.indexOf(i) + 1}`, bx + 90, by + 68);
+            } else {
+                ctx.fillStyle = "#1a252f";
+                ctx.font = "bold 26px Arial";
+                ctx.fillText(cInfo.name, bx + 90, by + 68);
+            }
+        });
+
+        ctx.fillStyle = "#ff4d4d";
+        roundRect(160, 840, 400, 65, 15, true);
+        ctx.fillStyle = COLOR_TEXT;
+        ctx.font = "bold 24px Arial";
+        ctx.fillText("Reset Colors", 360, 880);
+
+        ctx.fillStyle = (needed === 0) ? "#2ed573" : "#747d8c";
+        roundRect(160, 950, 400, 75, 15, true);
+        ctx.fillStyle = COLOR_TEXT;
+        ctx.font = "bold 24px Arial";
+        ctx.fillText("START GAME 🎮", 360, 995);
+    }
+}
+
+function drawBoard() {
+    ctx.fillStyle = COLOR_BG;
+    ctx.fillRect(0, 0, VIRTUAL_W, VIRTUAL_H);
+    ctx.fillStyle = COLOR_BOARD_BG;
+    ctx.fillRect(0, 0, BOARD_SIZE, BOARD_SIZE);
+
+    gameData.players.forEach(player => {
+        let rx = player.yard[0][0] < 7 ? 0 : 9 * TILE_SIZE;
+        let ry = player.yard[0][1] < 7 ? 0 : 9 * TILE_SIZE;
+        ctx.fillStyle = player.color;
+        ctx.globalAlpha = 0.25;
+        ctx.fillRect(rx, ry, 6 * TILE_SIZE, 6 * TILE_SIZE);
+        ctx.globalAlpha = 1.0;
+    });
+
+    MAIN_PATH.forEach((pos, idx) => {
+        ctx.fillStyle = SAFE_ZONES.includes(idx) ? "#ced6e0" : "#ffffff";
+        gameData.players.forEach(p => {
+            if (p.startIndex === idx) ctx.fillStyle = p.color;
+        });
+        ctx.fillRect(pos[0]*TILE_SIZE, pos[1]*TILE_SIZE, TILE_SIZE, TILE_SIZE);
+        ctx.strokeStyle = COLOR_LINE;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(pos[0]*TILE_SIZE, pos[1]*TILE_SIZE, TILE_SIZE, TILE_SIZE);
+    });
+
+    gameData.players.forEach(player => {
+        player.homePath.forEach(pos => {
+            ctx.fillStyle = player.color;
+            ctx.fillRect(pos[0]*TILE_SIZE, pos[1]*TILE_SIZE, TILE_SIZE, TILE_SIZE);
+            ctx.strokeRect(pos[0]*TILE_SIZE, pos[1]*TILE_SIZE, TILE_SIZE, TILE_SIZE);
+        });
+    });
+
+    ctx.fillStyle = COLOR_CENTER;
+    ctx.fillRect(6*TILE_SIZE, 6*TILE_SIZE, 3*TILE_SIZE, 3*TILE_SIZE);
+}
+
+function drawTokens() {
+    let movableList = (gameData.state === 'WAITING_FOR_MOVE') ? gameData.getMovableTokens() : [];
+    gameData.players.forEach((player, pIdx) => {
+        player.tokens.forEach(t => {
+            t.updatePosition();
+            ctx.beginPath();
+            ctx.arc(t.x, t.y, t.radius, 0, 2 * Math.PI);
+            ctx.fillStyle = player.color;
+            ctx.fill();
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+
+            if (movableList.includes(t) && pIdx === gameData.activePlayerIndex) {
+                ctx.beginPath();
+                ctx.arc(t.x, t.y, t.radius / 1.8, 0, 2 * Math.PI);
+                ctx.fillStyle = "#ffffff";
+                ctx.fill();
+            }
+        });
+    });
+}
+
+function drawDice(val) {
+    ctx.fillStyle = "#ffffff";
+    roundRect(diceRect.x, diceRect.y, diceRect.w, diceRect.h, 18, true);
+    ctx.strokeStyle = COLOR_LINE;
+    ctx.lineWidth = 4;
+    roundRect(diceRect.x, diceRect.y, diceRect.w, diceRect.h, 18, false, true);
+
+    if (val === 0) return;
+    let cx = diceRect.x + diceRect.w / 2;
+    let cy = diceRect.y + diceRect.h / 2;
+    let offset = 28;
+    let dots = [];
+
+    if (val === 1) dots = [[cx, cy]];
+    else if (val === 2) dots = [[cx - offset, cy - offset], [cx + offset, cy + offset]];
+    else if (val === 3) dots = [[cx - offset, cy - offset], [cx, cy], [cx + offset, cy + offset]];
+    else if (val === 4) dots = [[cx - offset, cy - offset], [cx + offset, cy - offset], [cx - offset, cy + offset], [cx + offset, cy + offset]];
+    else if (val === 5) dots = [[cx - offset, cy - offset], [cx + offset, cy - offset], [cx, cy], [cx - offset, cy + offset], [cx + offset, cy + offset]];
+    else if (val === 6) dots = [[cx - offset, cy - offset], [cx - offset, cy], [cx - offset, cy + offset], [cx + offset, cy - offset], [cx + offset, cy], [cx + offset, cy + offset]];
+
+    ctx.fillStyle = COLOR_BG;
+    dots.forEach(dot => {
+        ctx.beginPath();
+        ctx.arc(dot[0], dot[1], 11, 0, 2 * Math.PI);
+        ctx.fill();
+    });
+}
+
+function drawUI() {
+    let activePlayer = gameData.players[gameData.activePlayerIndex];
+    ctx.fillStyle = activePlayer.color;
+    ctx.font = "bold 46px Arial";
+    ctx.fillText(`${activePlayer.name}'s Turn`, VIRTUAL_W / 2, 790);
+
+    ctx.fillStyle = (gameData.state === 'WAITING_FOR_ROLL') ? activePlayer.color : "#747d8c";
+    roundRect(btnRect.x, btnRect.y, btnRect.w, btnRect.h, 15, true);
+    ctx.fillStyle = COLOR_TEXT;
+    ctx.font = "bold 26px Arial";
+    ctx.fillText("TAP TO ROLL", VIRTUAL_W / 2, btnRect.y + 48);
+
+    let msgStr = "Roll the dice!";
+    if (gameData.state === 'WAITING_FOR_MOVE') msgStr = "Tap a token to move.";
+    else if (gameData.state === 'NO_MOVES_SKIP') msgStr = `Rolled ${gameData.currentRoll}! No moves.`;
+    ctx.fillStyle = "#a4b0be";
+    ctx.font = "22px Arial";
+    ctx.fillText(msgStr, VIRTUAL_W / 2, 1150);
+}
+
+// --- INPUT & TOUCH CONTROLS ---
+function handleInput(e) {
+    e.preventDefault();
+    initAudio(); // Initialize audio context on first user interaction (Crucial for Mobile)
+
+    let rect = canvas.getBoundingClientRect();
+    let clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    let clientY = e.touches ? e.touches[0].clientY : e.clientY;
+
+    let scaledX = (clientX - rect.left) * (VIRTUAL_W / rect.width);
+    let scaledY = (clientY - rect.top) * (VIRTUAL_H / rect.height);
+
+    if (appState === "MENU") {
+        if (menuStep === "COUNT") {
+            for (let i = 0; i < 3; i++) {
+                if (scaledX >= 110+i*180 && scaledX <= 110+i*180+140 && scaledY >= 520 && scaledY <= 610) {
+                    playerCount = i + 2;
+                }
+            }
+            if (scaledX >= 160 && scaledX <= 560 && scaledY >= 780 && scaledY <= 855) {
+                menuStep = "COLORS";
+                selectedColorsIndices = [];
+            }
+        } 
+        else if (menuStep === "COLORS") {
+            const positions = [[130, 460], [410, 460], [130, 600], [410, 600]];
+            positions.forEach(([bx, by], i) => {
+                if (scaledX >= bx && scaledX <= bx + 180 && scaledY >= by && scaledY <= by + 110) {
+                    if (selectedColorsIndices.includes(i)) {
+                        selectedColorsIndices = selectedColorsIndices.filter(x => x !== i);
+                    } else if (selectedColorsIndices.length < playerCount) {
+                        selectedColorsIndices.push(i);
+                    }
+                }
+            });
+            if (scaledX >= 160 && scaledX <= 560 && scaledY >= 840 && scaledY <= 905) {
+                selectedColorsIndices = [];
+            }
+            if (scaledX >= 160 && scaledX <= 560 && scaledY >= 950 && scaledY <= 1025) {
+                if (selectedColorsIndices.length === playerCount) {
+                    initGameWorld();
+                    appState = "GAME";
+                }
+            }
+        }
+    } 
+    else {
+        if (scaledX >= btnRect.x && scaledX <= btnRect.x + btnRect.w && scaledY >= btnRect.y && scaledY <= btnRect.y + btnRect.h) {
+            if (gameData.state === 'WAITING_FOR_ROLL' && !gameData.isAnimatingDice) {
+                playSound('roll');
+                gameData.isAnimatingDice = true;
+                gameData.diceAnimStart = Date.now();
+            }
+        }
+        else if (gameData.state === 'WAITING_FOR_MOVE') {
+            let movable = gameData.getMovableTokens();
+            for (let t of movable) {
+                let dist = Math.hypot(scaledX - t.x, scaledY - t.y);
+                if (dist < TILE_SIZE / 1.5) {
+                    gameData.moveToken(t.id);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+canvas.addEventListener('mousedown', handleInput);
+canvas.addEventListener('touchstart', handleInput, { passive: false });
+
+// --- UTILITIES & GAME LOOP ---
+function roundRect(x, y, w, h, r, fill, stroke) {
+    ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+    if (fill) ctx.fill(); if (stroke) ctx.stroke();
+}
+
+function mainLoop() {
+    let now = Date.now();
+    if (appState === "GAME") {
+        if (gameData.state === 'NO_MOVES_SKIP' && (now - gameData.skipTimer > 1200)) {
+            gameData.endTurn();
+        }
+        if (gameData.isAnimatingDice) {
+            if (now - gameData.diceAnimStart > 600) {
+                gameData.isAnimatingDice = false;
+                gameData.rollDice();
+            } else {
+                gameData.dummyDiceVal = Math.floor(Math.random() * 6) + 1;
+            }
+        }
+    }
+
+    if (appState === "MENU") {
+        drawMenu();
+    } else {
+        calculateTargets();
+        drawBoard();
+        drawTokens();
+        drawUI();
+        drawDice(gameData.isAnimatingDice ? gameData.dummyDiceVal : gameData.currentRoll);
+    }
+    requestAnimationFrame(mainLoop);
+}
+
+requestAnimationFrame(mainLoop);
+</script>
+</body>
+</html>
